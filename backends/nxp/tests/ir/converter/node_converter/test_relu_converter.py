@@ -6,7 +6,6 @@
 import numpy as np
 import pytest
 import torch
-
 from executorch.backends.nxp.backend.edge_program_converter import (
     EdgeProgramToIRConverter,
     exir_ops,
@@ -21,7 +20,9 @@ from executorch.backends.nxp.tests.executors import (
     ToNCHWPreprocess,
     ToNHWCPreprocess,
 )
+from executorch.backends.nxp.tests.graph_verifier import BaseGraphVerifier
 from executorch.backends.nxp.tests.models import Conv2dModule, LinearModule, ReLUModule
+from executorch.backends.nxp.tests.nsys_testing import lower_run_compare
 from torch.export import ExportedProgram
 from executorch.backends.nxp.tests.use_qat import *  # noqa F403
 
@@ -37,10 +38,10 @@ ReLU = exir_ops.edge.aten.relu.default
 
 
 class ConvReLUModule(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, out_channels=8):
         super().__init__()
 
-        self.conv = Conv2dModule()
+        self.conv = Conv2dModule(out_channels=out_channels)
         self.relu = torch.nn.ReLU()
 
     def forward(self, x):
@@ -146,3 +147,27 @@ def test_relu_conversion__unsupported(mocker, input_shape):
     # Make sure the `relu` was NOT delegated.
     assert not graph_contains_any_of_ops(delegated_ep.graph, [ExecutorchDelegateCall])
     assert graph_contains_any_of_ops(delegated_ep.graph, [ReLU])
+
+
+@pytest.mark.parametrize(
+    ["model", "input_shape"],
+    [
+        pytest.param(
+            LinearReLUModule(),
+            (3, 9, 32),
+            id="Linear: num_channels not divisible by NUM_MACS",
+        ),
+        pytest.param(
+            ConvReLUModule(out_channels=9),
+            (1, 4, 32, 32),
+            id="Conv: num_channels not divisible by NUM_MACS",
+        ),
+    ],
+)
+def test_relu_conversion__new_flow_support(mocker, model, input_shape):
+    graph_verifier = BaseGraphVerifier(
+        exp_num_delegate_call_nodes=1,
+        exp_non_delegated_nodes=[],
+    )
+
+    lower_run_compare(model, input_shape, graph_verifier, use_new_flow_neutron_c=True)
