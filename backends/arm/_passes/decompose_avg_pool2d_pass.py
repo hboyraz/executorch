@@ -99,6 +99,8 @@ def _get_avgpool_post_pad(
 class DecomposeAvgPool2dPass(ArmPass):
     _passes_required_after: Set[Type[ExportPass]] = {ComputeConstantOpsAOTPass}
 
+    targeted_ops = {*edge_avg_pool2d, *aten_avg_pool2d}
+
     def call_operator(self, op, args, kwargs, meta):
         if op not in (
             edge_avg_pool2d + aten_avg_pool2d
