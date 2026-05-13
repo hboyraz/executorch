@@ -161,10 +161,6 @@ from executorch.backends.arm.tosa.specification import (
 from executorch.backends.transforms.fuse_cascaded_transpose_or_permute_ops import (
     FuseCascadedTransposeOrPermuteOps,
 )
-from executorch.backends.transforms.postpone_permute_below_squeeze_view import (
-    PostponePermuteOpBelowSqueezeOrUnsqueezeLikeView,
-)
-
 from executorch.exir import ExportedProgram
 from executorch.exir.pass_base import ExportPass
 from executorch.exir.pass_manager import PassManager
@@ -538,7 +534,6 @@ class ArmPassManager(PassManager):
                 RewritePadPass(),
                 FuseViewCopyTransformPass(),
                 RemovePermutesAroundElementwiseTosaOps(),
-                PostponePermuteOpBelowSqueezeOrUnsqueezeLikeView(),
                 FuseCascadedTransposeOrPermuteOps(),
                 ConvertPermuteSingletonToViewPass(),
                 RewriteHighRankSingletonPermutePass(),

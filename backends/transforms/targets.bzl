@@ -376,6 +376,7 @@ def define_common_targets():
             ":fuse_cascaded_transpose_or_permute_ops",
             ":fuse_cascaded_view_ops",
             ":postpone_permute_below_squeeze_view",
+            ":remove_permutes_around_elementwise_ops",
             ":replace_nop_transpose_or_permute_with_view",
         ],
     )
