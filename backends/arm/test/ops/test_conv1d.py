@@ -399,3 +399,76 @@ def test_convolution_1d_vgf_quant_a8w4(test_data):
         get_symmetric_a8w4_quantization_config(is_per_channel=per_channel_quantization)
     )
     pipeline.run()
+
+
+# a16w8 (int16 activation, int8 weight) quantization test configurations
+a16w8_conv1d_test_parameters = {
+    f"{k},per_channel_quant={q}": (lambda v=v, q=q: (v(), q))
+    for (k, v) in {
+        "k1_1x2x128_st1": lambda: Conv1d(
+            in_channels=2, out_channels=1, kernel_size=1,
+            stride=1, padding=0, length=128, batches=1,
+        ),
+        "k3_1x3x64_st1_pd1": lambda: Conv1d(
+            in_channels=3, out_channels=4, kernel_size=3,
+            stride=1, padding=1, length=64, batches=1,
+        ),
+        "k5_1x2x64_st1_pd2": lambda: Conv1d(
+            in_channels=2, out_channels=3, kernel_size=5,
+            stride=1, padding=2, length=64, batches=1,
+        ),
+        "k3_1x3x32_st2_pd1": lambda: Conv1d(
+            in_channels=3, out_channels=4, kernel_size=3,
+            stride=2, padding=1, length=32, batches=1,
+        ),
+        "k3_1x3x32_st1_dl2": lambda: Conv1d(
+            in_channels=3, out_channels=4, kernel_size=3,
+            stride=1, padding=0, dilation=2, length=32, batches=1,
+        ),
+        "k3_1x4x32_st1_pd1_depthwise": lambda: Conv1d(
+            in_channels=4, out_channels=4, kernel_size=3,
+            stride=1, padding=1, groups=4, length=32, batches=1,
+        ),
+        "k3_1x3x64_st1_pd1_nobias": lambda: Conv1d(
+            in_channels=3, out_channels=4, kernel_size=3,
+            stride=1, padding=1, bias=False, length=64, batches=1,
+        ),
+    }.items()
+    for q in [True, False]
+}
+
+
+@common.parametrize("test_data", a16w8_conv1d_test_parameters)
+@common.XfailIfNoCorstone300
+def test_conv1d_a16w8_u55_INT(test_data):
+    model, per_channel_quantization = test_data()
+    pipeline = EthosU55PipelineINT[input_t](
+        model,
+        model.get_inputs(),
+        aten_op,
+        exir_op,
+        a16w8_quantization=True,
+        symmetric_io_quantization=True,
+        per_channel_quantization=per_channel_quantization,
+        qtol=128,
+        epsilon=2**-16,
+    )
+    pipeline.run()
+
+
+@common.parametrize("test_data", a16w8_conv1d_test_parameters)
+@common.XfailIfNoCorstone320
+def test_conv1d_a16w8_u85_INT(test_data):
+    model, per_channel_quantization = test_data()
+    pipeline = EthosU85PipelineINT[input_t](
+        model,
+        model.get_inputs(),
+        aten_op,
+        exir_op,
+        a16w8_quantization=True,
+        symmetric_io_quantization=True,
+        per_channel_quantization=per_channel_quantization,
+        qtol=128,
+        epsilon=2**-16,
+    )
+    pipeline.run()
