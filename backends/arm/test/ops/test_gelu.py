@@ -176,3 +176,42 @@ def test_gelu_vgf_quant(test_data: input_t1):
         quantize=True,
     )
     pipeline.run()
+
+
+a16w8_gelu_test_parameters = {
+    "rank1_rand": lambda: torch.rand(10),
+    "rank2_rand": lambda: torch.rand(8, 8) - 0.5,
+    "rank3_randn": lambda: torch.randn(1, 4, 4) + 2,
+}
+
+
+@common.parametrize("test_data", a16w8_gelu_test_parameters)
+@common.XfailIfNoCorstone300
+def test_gelu_a16w8_u55_INT(test_data: input_t1):
+    pipeline = EthosU55PipelineINT[input_t1](
+        Gelu(),
+        (test_data(),),
+        Gelu.aten_op,
+        Gelu.exir_op,
+        a16w8_quantization=True,
+        symmetric_io_quantization=True,
+        qtol=128,
+        epsilon=2**-16,
+    )
+    pipeline.run()
+
+
+@common.parametrize("test_data", a16w8_gelu_test_parameters)
+@common.XfailIfNoCorstone320
+def test_gelu_a16w8_u85_INT(test_data: input_t1):
+    pipeline = EthosU85PipelineINT[input_t1](
+        Gelu(),
+        (test_data(),),
+        Gelu.aten_op,
+        Gelu.exir_op,
+        a16w8_quantization=True,
+        symmetric_io_quantization=True,
+        qtol=128,
+        epsilon=2**-16,
+    )
+    pipeline.run()
