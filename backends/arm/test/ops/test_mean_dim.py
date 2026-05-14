@@ -393,3 +393,50 @@ def test_mean_tosa_INT(test_data):
         symmetric_io_quantization=True,
     )
     pipeline.run()
+
+
+a16w8_mean_test_parameters = {
+    "rank_1_keepdim": lambda: (torch.rand(7), 0, True),
+    "rank_2_keepdim": lambda: (torch.rand(7, 3), (0, 1), True),
+    "rank_3_keepdim": lambda: (torch.rand(5, 7, 3), (0, 1, 2), True),
+    "rand_1_keepdim": lambda: (torch.rand(1, 5, 7, 3), (1), True),
+    "rand_23_keepdim": lambda: (torch.rand(1, 5, 7, 3), (2, 3), True),
+    "rand_0123_keepdim": lambda: (torch.rand(1, 5, 7, 3), (0, 1, 2, 3), True),
+    "rand_none_keepdim": lambda: (torch.rand(1, 5, 7, 3), None, True),
+    "rank_1": lambda: (torch.rand(7), (-1), False),
+    "rank_2": lambda: (torch.rand(5, 7), (-2, -1), False),
+    "rand_3": lambda: (torch.rand(1, 5, 7, 3), (-1), False),
+    "rand_123": lambda: (torch.rand(1, 5, 7, 3), (-3, -2, -1), False),
+}
+
+
+@common.parametrize("test_data", a16w8_mean_test_parameters)
+@common.XfailIfNoCorstone300
+def test_mean_dim_a16w8_u55_INT(test_data):
+    test_data, dim, keep_dim = test_data()
+    pipeline = EthosU55PipelineINT[input_t](
+        MeanDim(dim, keep_dim),
+        (test_data,),
+        [],
+        symmetric_io_quantization=True,
+        a16w8_quantization=True,
+        qtol=128,
+        epsilon=2**-16,
+    )
+    pipeline.run()
+
+
+@common.parametrize("test_data", a16w8_mean_test_parameters)
+@common.XfailIfNoCorstone320
+def test_mean_dim_a16w8_u85_INT(test_data):
+    test_data, dim, keep_dim = test_data()
+    pipeline = EthosU85PipelineINT[input_t](
+        MeanDim(dim, keep_dim),
+        (test_data,),
+        [],
+        symmetric_io_quantization=True,
+        a16w8_quantization=True,
+        qtol=128,
+        epsilon=2**-16,
+    )
+    pipeline.run()
