@@ -22,6 +22,9 @@ from executorch.backends.transforms.postpone_permute_below_squeeze_view import (
 from executorch.backends.transforms.replace_nop_transpose_or_permute_with_view import (
     ReplaceNopTransposeOrPermuteWithViewPass,
 )
+from executorch.backends.transforms.remove_permutes_around_elementwise_ops import (
+    RemovePermutesAroundElementwiseOps,
+)
 from executorch.exir.dialects._ops import ops as exir_ops
 from executorch.exir.pass_base import PassResult
 from torch.utils import _pytree as pytree
@@ -378,6 +381,248 @@ class ReplaceNopTransposeOrPermuteWithViewTest(unittest.TestCase):
         self.assertEqual(count_node(gm_after, exir_ops.edge.aten.view_copy.default), 1)
         validate_numerics(
             gm_before, gm_after, [x], "ReplaceNopTransposeOrPermuteWithViewPass"
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Tests for RemovePermutesAroundElementwiseOps cross-view handling
+# ──────────────────────────────────────────────────────────────────────
+
+
+class RemovePermutesAcrossViewTest(unittest.TestCase):
+    def test_permute_view_squeeze_elementwise_view_unsqueeze_permute(self) -> None:
+        """permute(3D) → view(unsqueeze) → mul(4D) → view(squeeze) → permute(3D)
+        should have both permutes removed."""
+        builder = GraphBuilder()
+        x_data = torch.randn(1, 128, 16)
+        x = builder.placeholder("x", x_data)
+        p1 = builder.call_operator(
+            op=exir_ops.edge.aten.permute_copy.default, args=(x, [0, 2, 1])
+        )
+        v1 = builder.call_operator(
+            op=exir_ops.edge.aten.view_copy.default, args=(p1, [1, 16, 1, 128])
+        )
+        mul = builder.call_operator(
+            op=exir_ops.edge.aten.mul.Tensor, args=(v1, v1)
+        )
+        v2 = builder.call_operator(
+            op=exir_ops.edge.aten.view_copy.default, args=(mul, [1, 16, 128])
+        )
+        p2 = builder.call_operator(
+            op=exir_ops.edge.aten.permute_copy.default, args=(v2, [0, 2, 1])
+        )
+        builder.output([p2])
+        original = builder.get_graph_module()
+        gm_before = copy.deepcopy(original)
+
+        p = RemovePermutesAroundElementwiseOps()
+        result = cast(PassResult, p(original))
+        self.assertTrue(result.modified)
+        self.assertEqual(
+            count_node(result.graph_module, exir_ops.edge.aten.permute_copy.default), 0
+        )
+        validate_numerics(
+            gm_before, result.graph_module, [x_data], "RemovePermutesAcrossView",
+        )
+
+    def test_4d_permute_squeeze_clamp_3d_permute(self) -> None:
+        """Cascade detector conv→LN boundary: permute_4D([0,3,1,2]) →
+        view(squeeze) → hardtanh → permute_3D([0,2,1]).
+        The two permutes should cancel across the squeeze+clamp."""
+        builder = GraphBuilder()
+        x_data = torch.randn(1, 1, 16, 128)
+        x = builder.placeholder("x", x_data)
+        p1 = builder.call_operator(
+            op=exir_ops.edge.aten.permute_copy.default, args=(x, [0, 3, 1, 2])
+        )
+        v1 = builder.call_operator(
+            op=exir_ops.edge.aten.view_copy.default, args=(p1, [1, 128, 16])
+        )
+        clamp = builder.call_operator(
+            op=exir_ops.edge.aten.hardtanh.default, args=(v1,)
+        )
+        p2 = builder.call_operator(
+            op=exir_ops.edge.aten.permute_copy.default, args=(clamp, [0, 2, 1])
+        )
+        builder.output([p2])
+        original = builder.get_graph_module()
+        gm_before = copy.deepcopy(original)
+
+        p = RemovePermutesAroundElementwiseOps()
+        result = cast(PassResult, p(original))
+        self.assertTrue(result.modified)
+        self.assertEqual(
+            count_node(result.graph_module, exir_ops.edge.aten.permute_copy.default), 0
+        )
+        validate_numerics(
+            gm_before, result.graph_module, [x_data],
+            "4D_permute_squeeze_clamp_3D_permute",
+        )
+
+    def test_permute_unsqueeze_cat_mul_squeeze_permute(self) -> None:
+        """Complex interaction: permute(3D) → view(unsqueeze to 4D) →
+        cat(two branches) → mul → view(squeeze to 3D) → permute(3D).
+        Tests cat + mul interacting with view/squeeze/unsqueeze boundaries."""
+        builder = GraphBuilder()
+        x_data = torch.randn(1, 128, 16)
+        y_data = torch.randn(1, 128, 16)
+        x = builder.placeholder("x", x_data)
+        y = builder.placeholder("y", y_data)
+        # Permute both inputs
+        px = builder.call_operator(
+            op=exir_ops.edge.aten.permute_copy.default, args=(x, [0, 2, 1])
+        )
+        py = builder.call_operator(
+            op=exir_ops.edge.aten.permute_copy.default, args=(y, [0, 2, 1])
+        )
+        # Unsqueeze via view to 4D
+        vx = builder.call_operator(
+            op=exir_ops.edge.aten.view_copy.default, args=(px, [1, 16, 1, 128])
+        )
+        vy = builder.call_operator(
+            op=exir_ops.edge.aten.view_copy.default, args=(py, [1, 16, 1, 128])
+        )
+        # Cat along dim 2 (the unsqueezed dim)
+        cat = builder.call_operator(
+            op=exir_ops.edge.aten.cat.default, args=([vx, vy], 2)
+        )
+        # Mul with itself
+        mul = builder.call_operator(
+            op=exir_ops.edge.aten.mul.Tensor, args=(cat, cat)
+        )
+        # Squeeze back via view
+        v_sq = builder.call_operator(
+            op=exir_ops.edge.aten.view_copy.default, args=(mul, [1, 16, 256])
+        )
+        # End permute
+        p_end = builder.call_operator(
+            op=exir_ops.edge.aten.permute_copy.default, args=(v_sq, [0, 2, 1])
+        )
+        builder.output([p_end])
+        original = builder.get_graph_module()
+        gm_before = copy.deepcopy(original)
+
+        p = RemovePermutesAroundElementwiseOps()
+        result = cast(PassResult, p(original))
+        # The cat changes output shape so squeeze view won't match the
+        # original unsqueeze pattern; the pass should not fire here.
+        self.assertFalse(result.modified)
+        validate_numerics(
+            gm_before, result.graph_module, [x_data, y_data],
+            "permute_unsqueeze_cat_mul_squeeze_permute",
+        )
+
+    def test_permute_view_add_sub_mul_view_permute(self) -> None:
+        """Chain of multiple elementwise ops between view boundaries:
+        permute(3D) → view(unsqueeze) → add → sub → mul → view(squeeze) → permute(3D).
+        All three elementwise ops should be handled."""
+        builder = GraphBuilder()
+        x_data = torch.randn(1, 128, 16)
+        x = builder.placeholder("x", x_data)
+        p1 = builder.call_operator(
+            op=exir_ops.edge.aten.permute_copy.default, args=(x, [0, 2, 1])
+        )
+        # Unsqueeze via view
+        v1 = builder.call_operator(
+            op=exir_ops.edge.aten.view_copy.default, args=(p1, [1, 16, 1, 128])
+        )
+        # Chain of elementwise ops
+        add = builder.call_operator(
+            op=exir_ops.edge.aten.add.Tensor, args=(v1, v1)
+        )
+        sub = builder.call_operator(
+            op=exir_ops.edge.aten.sub.Tensor, args=(add, v1)
+        )
+        mul = builder.call_operator(
+            op=exir_ops.edge.aten.mul.Tensor, args=(sub, sub)
+        )
+        # Squeeze via view
+        v2 = builder.call_operator(
+            op=exir_ops.edge.aten.view_copy.default, args=(mul, [1, 16, 128])
+        )
+        p2 = builder.call_operator(
+            op=exir_ops.edge.aten.permute_copy.default, args=(v2, [0, 2, 1])
+        )
+        builder.output([p2])
+        original = builder.get_graph_module()
+        gm_before = copy.deepcopy(original)
+
+        p = RemovePermutesAroundElementwiseOps()
+        result = cast(PassResult, p(original))
+        self.assertTrue(result.modified)
+        self.assertEqual(
+            count_node(result.graph_module, exir_ops.edge.aten.permute_copy.default), 0
+        )
+        validate_numerics(
+            gm_before, result.graph_module, [x_data],
+            "permute_view_add_sub_mul_view_permute",
+        )
+
+    def test_permute_squeeze_clamp_add_permute(self) -> None:
+        """4D permute → squeeze(view) → hardtanh → add(with self) → 3D permute.
+        Tests clamp + add interacting across a squeeze boundary."""
+        builder = GraphBuilder()
+        x_data = torch.randn(1, 1, 16, 128)
+        x = builder.placeholder("x", x_data)
+        p1 = builder.call_operator(
+            op=exir_ops.edge.aten.permute_copy.default, args=(x, [0, 3, 1, 2])
+        )
+        # Squeeze dim 2 (size 1) via view
+        v1 = builder.call_operator(
+            op=exir_ops.edge.aten.view_copy.default, args=(p1, [1, 128, 16])
+        )
+        clamp = builder.call_operator(
+            op=exir_ops.edge.aten.hardtanh.default, args=(v1,)
+        )
+        add = builder.call_operator(
+            op=exir_ops.edge.aten.add.Tensor, args=(clamp, clamp)
+        )
+        p2 = builder.call_operator(
+            op=exir_ops.edge.aten.permute_copy.default, args=(add, [0, 2, 1])
+        )
+        builder.output([p2])
+        original = builder.get_graph_module()
+        gm_before = copy.deepcopy(original)
+
+        p = RemovePermutesAroundElementwiseOps()
+        result = cast(PassResult, p(original))
+        self.assertTrue(result.modified)
+        self.assertEqual(
+            count_node(result.graph_module, exir_ops.edge.aten.permute_copy.default), 0
+        )
+        validate_numerics(
+            gm_before, result.graph_module, [x_data],
+            "permute_squeeze_clamp_add_permute",
+        )
+
+    def test_no_fire_non_squeeze_view(self) -> None:
+        """permute → view (not a squeeze/unsqueeze, changes shape) → mul → permute.
+        The pass should NOT remove permutes when the view is not a simple
+        squeeze/unsqueeze."""
+        builder = GraphBuilder()
+        x_data = torch.randn(1, 6, 8)
+        x = builder.placeholder("x", x_data)
+        p1 = builder.call_operator(
+            op=exir_ops.edge.aten.permute_copy.default, args=(x, [0, 2, 1])
+        )
+        # This view reshapes 8x6 → 4x12, which is NOT a squeeze/unsqueeze
+        v1 = builder.call_operator(
+            op=exir_ops.edge.aten.view_copy.default, args=(p1, [1, 4, 12])
+        )
+        mul = builder.call_operator(
+            op=exir_ops.edge.aten.mul.Tensor, args=(v1, v1)
+        )
+        p2 = builder.call_operator(
+            op=exir_ops.edge.aten.permute_copy.default, args=(mul, [0, 2, 1])
+        )
+        builder.output([p2])
+        original = builder.get_graph_module()
+
+        p = RemovePermutesAroundElementwiseOps()
+        result = cast(PassResult, p(original))
+        # Should NOT have removed permutes (view is not squeeze/unsqueeze-like)
+        self.assertEqual(
+            count_node(result.graph_module, exir_ops.edge.aten.permute_copy.default), 2
         )
 
     def test_replace_nop_transpose_with_view_int(self) -> None:
